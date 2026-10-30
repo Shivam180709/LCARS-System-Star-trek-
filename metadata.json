@@ -1,0 +1,10 @@
+{
+  "name": "Starfleet LCARS Science Terminal",
+  "description": "Futuristic Star Trek LCARS interactive science exhibition interface featuring a 3D USS Enterprise, interactive science encyclopedias, voice-enabled Gemini AI computer assistant, and bridge simulation.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

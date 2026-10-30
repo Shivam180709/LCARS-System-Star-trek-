@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --lcars-orange: #ff9900;
+    --lcars-amber: #ffaa00;
+    --lcars-gold: #cc9966;
+    --lcars-red: #cc3333;
+    --lcars-red-alert: #ff2222;
+    --lcars-purple: #cc6699;
+    --lcars-lilac: #cc99cc;
+    --lcars-blue: #3366cc;
+    --lcars-cyan: #3399cc;
+    --lcars-ice: #99ccff;
+    --lcars-teal: #00aaaa;
+    --lcars-dark-blue: #001133;
+    --lcars-bg: #000000;
+    --lcars-panel: #0d0d12;
+  }
+
+  body {
+    background-color: #000000;
+    color: #ff9900;
+    font-family: 'Antonio', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    letter-spacing: 0.05em;
+    overflow-x: hidden;
+  }
+
+  /* Monospace LCARS readout elements */
+  .lcars-mono {
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.02em;
+  }
+
+  .lcars-title {
+    font-family: 'Orbitron', 'Antonio', sans-serif;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+}
+
+/* Custom LCARS scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #000000;
+  border-left: 1px solid #1a1a24;
+}
+::-webkit-scrollbar-thumb {
+  background: #ff9900;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #ffaa00;
+}
+
+/* Scanline and CRT texture effects */
+.lcars-scanlines {
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%, 
+    rgba(0, 0, 0, 0.35) 50%
+  ), linear-gradient(
+    90deg,
+    rgba(255, 0, 0, 0.03),
+    rgba(0, 255, 0, 0.01),
+    rgba(0, 0, 255, 0.03)
+  );
+  background-size: 100% 3px, 6px 100%;
+  pointer-events: none;
+}
+
+/* LCARS grid overlay */
+.lcars-grid-bg {
+  background-image: 
+    radial-gradient(circle at 50% 50%, rgba(255, 153, 0, 0.05) 0%, transparent 60%),
+    linear-gradient(to right, rgba(51, 102, 204, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(51, 102, 204, 0.06) 1px, transparent 1px);
+  background-size: 100% 100%, 30px 30px, 30px 30px;
+}
+
+/* LCARS Elbow Shapes */
+.lcars-elbow-top-left {
+  border-top: 14px solid currentColor;
+  border-left: 48px solid currentColor;
+  border-top-left-radius: 28px;
+}
+
+.lcars-elbow-bottom-left {
+  border-bottom: 14px solid currentColor;
+  border-left: 48px solid currentColor;
+  border-bottom-left-radius: 28px;
+}
+
+/* Glowing text and borders for Red Alert */
+.red-alert-glow {
+  animation: redAlertPulse 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes redAlertPulse {
+  0% {
+    box-shadow: 0 0 10px rgba(255, 34, 34, 0.2), inset 0 0 10px rgba(255, 34, 34, 0.2);
+    border-color: rgba(255, 34, 34, 0.4);
+  }
+  100% {
+    box-shadow: 0 0 25px rgba(255, 34, 34, 0.7), inset 0 0 25px rgba(255, 34, 34, 0.5);
+    border-color: rgba(255, 50, 50, 0.95);
+  }
+}
+
+/* Warp effect beam */
+@keyframes warpStreak {
+  0% { transform: translateY(-100%); opacity: 0; }
+  50% { opacity: 0.8; }
+  100% { transform: translateY(100%); opacity: 0; }
+}
+
+.animate-warp-streak {
+  animation: warpStreak 1.2s cubic-bezier(0.1, 0.8, 0.2, 1) infinite;
+}
