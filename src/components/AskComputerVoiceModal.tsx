@@ -124,16 +124,15 @@ export const AskComputerVoiceModal: React.FC<AskComputerProps> = ({
     };
   }, []);
 
-  // Seed initial topic if provided
+  // Seed initial topic only when opened with a specific topic
   useEffect(() => {
-    if (initialTopic && isOpen && chatHistory.length === 0) {
+    if (initialTopic && isOpen) {
       setQuery(`Explain the scientific physics and canon of: ${initialTopic}`);
     }
   }, [initialTopic, isOpen]);
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
-      alert('Speech recognition is not supported in this browser. Please type your query.');
       return;
     }
 
@@ -164,21 +163,21 @@ export const AskComputerVoiceModal: React.FC<AskComputerProps> = ({
 
   // Ultra-Fast Real-Time Streaming SSE Submit with Multi-turn Cross-Questioning History
   const handleStreamSubmit = async (overridePrompt?: string) => {
-    const textToSubmit = overridePrompt || query;
-    if (!textToSubmit.trim() || isLoading) return;
+    const textToSubmit = (overridePrompt ?? query).trim();
+    if (!textToSubmit || isLoading) return;
 
     speechController.stopAllSpeech();
 
+    const priorHistory = [...chatHistory];
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      text: textToSubmit.trim(),
+      text: textToSubmit,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
-    // 1. Immediately store into conversation history for multi-turn context
-    const updatedHistory = [...chatHistory, userMessage];
-    setChatHistory(updatedHistory);
+    // 1. Immediately show the user's message in the UI
+    setChatHistory([...priorHistory, userMessage]);
 
     // 2. Clear the message input box immediately
     setQuery('');
@@ -193,35 +192,67 @@ export const AskComputerVoiceModal: React.FC<AskComputerProps> = ({
     }
     abortControllerRef.current = new AbortController();
 
+    // Only pass initialTopic if the query actually mentions it or is the first seeded prompt
+    const topicRelevant =
+      initialTopic &&
+      textToSubmit.toLowerCase().includes(initialTopic.toLowerCase().slice(0, 12))
+        ? initialTopic
+        : undefined;
+
+    const historyPayload = priorHistory.map((m) => ({
+      role: m.role,
+      text: m.text,
+    }));
+
     try {
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage.text,
-          contextTopic: initialTopic,
-          history: updatedHistory.map((m) => ({
-            role: m.role,
-            text: m.text,
-          })),
+          contextTopic: topicRelevant,
+          history: historyPayload,
         }),
         signal: abortControllerRef.current.signal,
       });
 
-      if (!res.body) throw new Error('No stream body');
+      if (!res.ok || !res.body) throw new Error('Stream unavailable');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = '';
+      let lineBuffer = '';
+      let committed = false;
+
+      const commitAssistantReply = (finalText: string) => {
+        if (committed || !finalText.trim()) return;
+        committed = true;
+        const cleanText = finalText.trim();
+        const assistantMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          text: cleanText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setChatHistory((prev) => [...prev, assistantMessage]);
+        setStreamingResponse('');
+
+        if (autoSpeak && cleanText) {
+          speechController.speakText(cleanText, selectedVoice);
+        }
+      };
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        lineBuffer += decoder.decode(value, { stream: true });
+        const lines = lineBuffer.split('\n');
+        // Keep the last potentially incomplete line in lineBuffer
+        lineBuffer = lines.pop() ?? '';
 
-        for (const line of lines) {
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
@@ -230,35 +261,67 @@ export const AskComputerVoiceModal: React.FC<AskComputerProps> = ({
                 setStreamingResponse(accumulated);
               }
               if (data.done) {
-                const assistantMessage: ChatMessage = {
-                  id: (Date.now() + 1).toString(),
-                  role: 'assistant',
-                  text: accumulated,
-                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                };
-                setChatHistory((prev) => [...prev, assistantMessage]);
-                setStreamingResponse('');
-
-                if (autoSpeak && accumulated) {
-                  speechController.speakText(accumulated, selectedVoice);
-                }
+                commitAssistantReply(accumulated);
               }
-            } catch {}
+            } catch {
+              // ignore malformed partial JSON
+            }
           }
         }
       }
+
+      // Flush any remaining buffered line
+      if (lineBuffer.trim().startsWith('data: ')) {
+        try {
+          const data = JSON.parse(lineBuffer.trim().slice(6));
+          if (data.text) accumulated += data.text;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!committed && accumulated.trim()) {
+        commitAssistantReply(accumulated);
+      } else if (!committed) {
+        throw new Error('Empty stream response');
+      }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
-        const fallback = 'In theoretical physics, general relativity permits faster-than-light metrics by contracting spacetime ahead and expanding it behind using negative energy. In Starfleet engineering, the Enterprise achieves this via twin warp nacelles channeling matter-antimatter annihilation through dilithium to generate symmetric subspace fields with zero relativistic time dilation.';
-        const assistantMessage: ChatMessage = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          text: fallback,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
-        setChatHistory((prev) => [...prev, assistantMessage]);
-        setStreamingResponse('');
-        if (autoSpeak) speechController.speakText(fallback, selectedVoice);
+        try {
+          // Fallback to standard /api/chat endpoint with the exact question and history
+          const backupRes = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: userMessage.text,
+              contextTopic: topicRelevant,
+              history: historyPayload,
+            }),
+          });
+          const backupData = await backupRes.json();
+          const replyText =
+            backupData?.text ||
+            `Unable to reach the Federation Subspace Relay for "${userMessage.text}". Please try your inquiry again.`;
+          const assistantMessage: ChatMessage = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            text: replyText,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+          setChatHistory((prev) => [...prev, assistantMessage]);
+          setStreamingResponse('');
+          if (autoSpeak) speechController.speakText(replyText, selectedVoice);
+        } catch {
+          const errorReply = `Subspace communication link interrupted while processing "${userMessage.text}". Please re-engage your query.`;
+          const assistantMessage: ChatMessage = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            text: errorReply,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+          setChatHistory((prev) => [...prev, assistantMessage]);
+          setStreamingResponse('');
+        }
       }
     } finally {
       setIsLoading(false);

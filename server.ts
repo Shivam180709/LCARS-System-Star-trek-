@@ -2,7 +2,9 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { SCIENCE_DATABASE } from './src/data/scienceData';
+import { STAR_TREK_CANON_DATABASE } from './src/data/starTrekData';
 
 dotenv.config();
 
@@ -15,10 +17,10 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '15mb' }));
 
 // Initialize Gemini SDK with User-Agent telemetry
-const apiKey = process.env.GEMINI_API_KEY;
-let ai: GoogleGenAI | null = null;
-if (apiKey) {
-  ai = new GoogleGenAI({
+function getAiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
@@ -28,39 +30,141 @@ if (apiKey) {
   });
 }
 
-// Ultra-fast brief fallback answers formatted in a single cohesive paragraph
-function getStarfleetBriefAnswer(query: string): string {
-  const q = query.toLowerCase();
+// Smart local archive lookup only used if no Gemini API key is available
+function getStarfleetBriefAnswer(query: string, contextTopic?: string): string {
+  const combined = `${query} ${contextTopic || ''}`.toLowerCase().trim();
+  const words = combined
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !['the', 'and', 'for', 'what', 'how', 'why', 'explain', 'does', 'can', 'you', 'tell', 'about', 'with', 'from', 'are'].includes(w));
 
-  if (q.includes('warp') || q.includes('faster than light') || q.includes('speed') || q.includes('alcubierre')) {
-    return `In theoretical physics, general relativity permits faster-than-light metrics like the Alcubierre drive by contracting spacetime in front of a vessel and expanding it behind using negative energy densities. In Starfleet engineering, the Enterprise achieves this via twin warp nacelles channeling matter-antimatter annihilation through dilithium to generate symmetric subspace fields, circumventing relativistic time dilation completely.`;
+  // 1. Score Science Database entries
+  let bestScienceScore = 0;
+  let bestScience = SCIENCE_DATABASE[0];
+  for (const item of SCIENCE_DATABASE) {
+    const hay = `${item.title} ${item.subtitle} ${item.tags.join(' ')} ${item.realScience} ${item.starTrekCanon || ''}`.toLowerCase();
+    let score = 0;
+    if (combined.includes(item.title.toLowerCase())) score += 10;
+    for (const w of words) {
+      if (item.title.toLowerCase().includes(w)) score += 4;
+      else if (item.tags.some((t) => t.toLowerCase().includes(w))) score += 3;
+      else if (hay.includes(w)) score += 1;
+    }
+    if (score > bestScienceScore) {
+      bestScienceScore = score;
+      bestScience = item;
+    }
   }
 
-  if (q.includes('transporter') || q.includes('beam') || q.includes('teleport')) {
-    return `Real quantum teleportation transfers entangled quantum states between particles, though the Heisenberg uncertainty principle makes scanning macroscopic human states currently impossible. Starfleet transporters resolve this barrier with fictional Heisenberg compensators, dematerializing matter into an energy stream projected across tens of thousands of kilometers along an annular confinement beam.`;
+  // 2. Score Star Trek Canon entries
+  let bestCanonScore = 0;
+  let bestCanon = STAR_TREK_CANON_DATABASE[0];
+  for (const item of STAR_TREK_CANON_DATABASE) {
+    const hay = `${item.title} ${item.designation || ''} ${item.starTrekLore} ${item.realScienceFact}`.toLowerCase();
+    let score = 0;
+    if (combined.includes(item.title.toLowerCase())) score += 10;
+    for (const w of words) {
+      if (item.title.toLowerCase().includes(w)) score += 4;
+      else if (hay.includes(w)) score += 1;
+    }
+    if (score > bestCanonScore) {
+      bestCanonScore = score;
+      bestCanon = item;
+    }
   }
 
-  if (q.includes('dilithium') || q.includes('crystal')) {
-    return `In the periodic table, Element 87 is Francium, a radioactive alkali metal rather than a stable mineral. In Starfleet canon, dilithium is an exotic mineral with a four-dimensional crystalline matrix that regulates high-energy matter-antimatter plasma streams without disintegrating.`;
+  if (bestScienceScore >= bestCanonScore && bestScienceScore >= 2) {
+    return `${bestScience.realScience} ${bestScience.starTrekCanon || ''}`.trim();
+  }
+  if (bestCanonScore >= 2) {
+    const cleanScience = bestCanon.realScienceFact.replace(/^REAL SCIENCE:\s*/i, '');
+    return `${bestCanon.starTrekLore} ${cleanScience}`.trim();
   }
 
-  if (q.includes('antimatter') || q.includes('power') || q.includes('energy')) {
-    return `Modern particle colliders produce real antiprotons and positrons, converting 100% of rest mass directly into pure energy via Einstein's mass-energy equivalence at ninety petajoules per kilogram. Starfleet harness this raw energy within magnetic containment reactors to power the Enterprise's primary electro-plasma network and warp coils.`;
+  return `Regarding "${query.trim()}", Starfleet LCARS databases correlate real-world physics, astronomy, and planetary science with Federation exploration telemetry. Please ask a specific follow-up detail or select any database module for deeper analysis.`;
+}
+
+/**
+ * Ensures multi-turn conversation history strictly alternates user -> model -> user
+ * and starts with a 'user' turn, preventing Gemini API 400 Invalid Argument errors
+ * and preventing duplicate trailing user messages.
+ */
+function buildNormalizedContents(
+  history: Array<{ role?: string; text?: string }>,
+  currentPrompt: string,
+  rawMessage: string
+) {
+  const normalized: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+  if (Array.isArray(history) && history.length > 0) {
+    // Filter out empty turns
+    const validTurns = history
+      .filter((t) => t && typeof t.text === 'string' && t.text.trim().length > 0)
+      .map((t) => ({
+        role: (t.role === 'assistant' || t.role === 'model' ? 'model' : 'user') as 'user' | 'model',
+        text: t.text!.trim(),
+      }));
+
+    // If the client already appended the current user message to the end of history, remove that duplicate
+    if (
+      validTurns.length > 0 &&
+      validTurns[validTurns.length - 1].role === 'user' &&
+      validTurns[validTurns.length - 1].text === rawMessage.trim()
+    ) {
+      validTurns.pop();
+    }
+
+    // Keep up to the last 8 turns
+    const recentTurns = validTurns.slice(-8);
+
+    // Drop any leading 'model' turns so the conversation always starts with 'user'
+    while (recentTurns.length > 0 && recentTurns[0].role === 'model') {
+      recentTurns.shift();
+    }
+
+    // Merge consecutive turns of the same role to guarantee strict user/model alternation
+    for (const turn of recentTurns) {
+      const prev = normalized[normalized.length - 1];
+      if (prev && prev.role === turn.role) {
+        prev.parts[0].text += `\n${turn.text}`;
+      } else {
+        normalized.push({
+          role: turn.role,
+          parts: [{ text: turn.text }],
+        });
+      }
+    }
   }
 
-  if (q.includes('shield') || q.includes('deflector')) {
-    return `Aerospace researchers actively investigate electromagnetic and plasma deflector fields to shield interplanetary astronauts from ionizing cosmic radiation. On the Enterprise, localized high-frequency graviton distortion fields form defensive shields, while forward navigational deflectors emit focused tractor streams to sweep micro-asteroids clear of the flight path.`;
+  // Ensure the turn before our new user prompt is 'model' (if normalized is non-empty)
+  const lastTurn = normalized[normalized.length - 1];
+  if (lastTurn && lastTurn.role === 'user') {
+    lastTurn.parts[0].text += `\n${currentPrompt}`;
+  } else {
+    normalized.push({
+      role: 'user',
+      parts: [{ text: currentPrompt }],
+    });
   }
 
-  if (q.includes('prime directive') || q.includes('ethics') || q.includes('rule')) {
-    return `The Prime Directive parallels NASA and COSPAR planetary protection protocols aimed at preventing cross-contamination of extraterrestrial ecosystems. In Starfleet protocol, General Order One strictly prohibits introducing advanced technology or cultural contamination to pre-warp civilizations under severe penalty of court-martial.`;
-  }
+  return normalized;
+}
 
-  if (q.includes('alien') || q.includes('vulcan') || q.includes('blood') || q.includes('species')) {
-    return `Earth organisms like horseshoe crabs and octopuses naturally synthesize copper-based hemocyanin blood that turns green-blue when oxygenated in cold waters. Similarly, Vulcans evolved on a harsh high-gravity desert world orbiting 40 Eridani A, developing green copper blood, secondary eyelids, and mental disciplines rooted in pure logic.`;
-  }
+function buildSystemInstruction(language: string, contextTopic?: string): string {
+  const topicNote = contextTopic
+    ? `\n- Optional background context if the user's question is a shorthand or refers to the currently open exhibit: "${contextTopic}". However, if the user asks about a different subject, IGNORE this background topic and answer the user's actual question directly!`
+    : '';
 
-  return `Starfleet LCARS systems process sensor telemetry using isolinear optical arrays, correlating Federation astrophysical databases with quantum mechanics and general relativity to resolve anomalous phenomena.`;
+  return `You are the Starfleet LCARS Main Computer on the USS Enterprise.
+Your primary directive is to directly, accurately, and specifically answer the exact question the user asked.
+
+CRITICAL ACCURACY & RELEVANCE RULES:
+1. ALWAYS answer the user's exact question first and foremost. Never substitute a pre-canned topic (like warp drive or isolinear chips) if the user asked about something else.
+2. Whether the user asks about real-world science (physics, astronomy, biology, chemistry, mathematics, Earth history, technology), Star Trek lore (ships, characters, species, episodes, bridge systems), or a general question, answer THAT exact subject accurately.
+3. When relevant, briefly connect real-world science and Star Trek canon naturally, but never force unrelated Star Trek jargon if it detracts from answering the user's question.
+4. For follow-up questions (e.g. "why?", "how fast is that?", "explain more", "what about in real life?"), use the preceding conversation history to stay strictly on the subject being discussed.${topicNote}
+5. Format your answer in ONE cohesive, clear paragraph of roughly 45 to 85 words. Do not use bullet points, markdown headers, or conversational filler.
+6. Respond in ${language}.`;
 }
 
 // 1. Real-Time Streaming Gemini Endpoint (SSE) for Ultra-Fast Typing & Cross-Questioning History
@@ -78,8 +182,9 @@ app.post('/api/chat/stream', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
+  const ai = getAiClient();
   if (!ai) {
-    const brief = getStarfleetBriefAnswer(message);
+    const brief = getStarfleetBriefAnswer(message, contextTopic);
     const words = brief.split(' ');
     for (const w of words) {
       res.write(`data: ${JSON.stringify({ text: w + ' ' })}\n\n`);
@@ -90,64 +195,62 @@ app.post('/api/chat/stream', async (req, res) => {
     return;
   }
 
-  try {
-    const systemInstruction = `You are the Starfleet LCARS Main Computer on the USS Enterprise (NCC-1701-D).
-You provide brief, direct, intelligent answers to Starfleet officers exploring science, astrophysics, technology, and Starfleet canon.
-STRICT RESPONSE RULES:
-1. Answer in EXACTLY ONE single cohesive paragraph (around 40 to 75 words).
-2. DO NOT use bullets or separate headers like "■ REAL SCIENCE:" or "■ STAR TREK CANON:". Weave the real-world science and Star Trek universe context together into one flowing paragraph.
-3. No pleasantries, greetings, sign-offs, or conversational filler. Deliver the explanation directly.
-4. If the user asks a follow-up or cross-question about earlier conversation turns, maintain continuous context from the chat history.
-5. Language: ${language}.`;
+  const systemInstruction = buildSystemInstruction(language, contextTopic);
+  const contents = buildNormalizedContents(history, message.trim(), message.trim());
 
-    // Construct conversation history for multi-turn cross-questioning
-    const contents: any[] = [];
-    if (Array.isArray(history) && history.length > 0) {
-      for (const turn of history.slice(-6)) {
-        if (turn.text && typeof turn.text === 'string') {
-          contents.push({
-            role: turn.role === 'assistant' || turn.role === 'model' ? 'model' : 'user',
-            parts: [{ text: turn.text }],
-          });
+  // Cascade through active models so transient issues never drop into unrelated static fallbacks
+  const candidateModels: Array<{ name: string; useThinkingLow: boolean }> = [
+    { name: 'gemini-3.8-flash', useThinkingLow: true },
+    { name: 'gemini-flash-latest', useThinkingLow: false },
+    { name: 'gemini-3.1-flash-lite', useThinkingLow: false },
+  ];
+
+  let streamedAnyText = false;
+
+  for (const candidate of candidateModels) {
+    try {
+      const config: Record<string, any> = {
+        systemInstruction,
+      };
+      if (candidate.useThinkingLow) {
+        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+
+      const stream = await ai.models.generateContentStream({
+        model: candidate.name,
+        contents,
+        config,
+      });
+
+      for await (const chunk of stream) {
+        const textChunk = chunk.text;
+        if (textChunk) {
+          streamedAnyText = true;
+          res.write(`data: ${JSON.stringify({ text: textChunk })}\n\n`);
         }
       }
-    }
 
-    const currentPrompt = contextTopic
-      ? `[Base Context: Starfleet Science & Star Trek Universe // Subject: ${contextTopic}]\nQuery: ${message}`
-      : `[Base Context: Starfleet Science & Star Trek Universe]\nQuery: ${message}`;
-
-    contents.push({
-      role: 'user',
-      parts: [{ text: currentPrompt }],
-    });
-
-    const stream = await ai.models.generateContentStream({
-      model: 'gemini-3.1-flash-lite',
-      contents,
-      config: {
-        systemInstruction,
-        maxOutputTokens: 140, // Fast sub-second generation
-        temperature: 0.2,
-      },
-    });
-
-    for await (const chunk of stream) {
-      const textChunk = chunk.text;
-      if (textChunk) {
-        res.write(`data: ${JSON.stringify({ text: textChunk })}\n\n`);
+      if (streamedAnyText) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+        return;
+      }
+    } catch (err: any) {
+      console.warn(`[LCARS Stream] Model ${candidate.name} failed:`, err?.message || err);
+      if (streamedAnyText) {
+        // Already partially streamed; finish cleanly
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+        return;
       }
     }
-
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    res.end();
-  } catch (err: any) {
-    console.warn('[LCARS Stream] Handled stream error, using fallback:', err?.message || err);
-    const fallback = getStarfleetBriefAnswer(message);
-    res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    res.end();
   }
+
+  // Final fallback if all models are unreachable
+  const fallback = getStarfleetBriefAnswer(message, contextTopic);
+  res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
+  res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+  res.end();
 });
 
 // 2. Standard Chat Endpoint (Backup) with History
@@ -160,50 +263,56 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
+    const ai = getAiClient();
     if (!ai) {
-      const brief = getStarfleetBriefAnswer(message);
+      const brief = getStarfleetBriefAnswer(message, contextTopic);
       res.json({ text: brief, source: 'starfleet_archive' });
       return;
     }
 
-    const systemInstruction = `You are the Starfleet LCARS Main Computer on the USS Enterprise.
-Answer in ONE single brief paragraph (under 70 words).
-Do NOT separate into bullet points or "REAL SCIENCE / CANON" headers. Integrate scientific facts and Star Trek canon seamlessly.
-Maintain history continuity for follow-up cross questions. No conversational greetings. Language: ${language}.`;
+    const systemInstruction = buildSystemInstruction(language, contextTopic);
+    const contents = buildNormalizedContents(history, message.trim(), message.trim());
 
-    const contents: any[] = [];
-    if (Array.isArray(history) && history.length > 0) {
-      for (const turn of history.slice(-6)) {
-        if (turn.text && typeof turn.text === 'string') {
-          contents.push({
-            role: turn.role === 'assistant' || turn.role === 'model' ? 'model' : 'user',
-            parts: [{ text: turn.text }],
-          });
+    const candidateModels: Array<{ name: string; useThinkingLow: boolean }> = [
+      { name: 'gemini-3.8-flash', useThinkingLow: true },
+      { name: 'gemini-flash-latest', useThinkingLow: false },
+      { name: 'gemini-3.1-flash-lite', useThinkingLow: false },
+    ];
+
+    for (const candidate of candidateModels) {
+      try {
+        const config: Record<string, any> = {
+          systemInstruction,
+        };
+        if (candidate.useThinkingLow) {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
         }
+
+        const response = await ai.models.generateContent({
+          model: candidate.name,
+          contents,
+          config,
+        });
+
+        if (response.text && response.text.trim()) {
+          res.json({
+            text: response.text.trim(),
+            source: candidate.name,
+          });
+          return;
+        }
+      } catch (err: any) {
+        console.warn(`[LCARS Chat] Model ${candidate.name} failed:`, err?.message || err);
       }
     }
 
-    contents.push({
-      role: 'user',
-      parts: [{ text: `[Base Star Trek Context]\nQuery: ${message}` }],
-    });
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
-
     res.json({
-      text: response.text || getStarfleetBriefAnswer(message),
-      source: 'gemini',
+      text: getStarfleetBriefAnswer(message, contextTopic),
+      source: 'starfleet_fallback',
     });
   } catch (error: any) {
     res.json({
-      text: getStarfleetBriefAnswer(req.body?.message || ''),
+      text: getStarfleetBriefAnswer(req.body?.message || '', req.body?.contextTopic),
       source: 'starfleet_fallback',
     });
   }
@@ -215,7 +324,7 @@ const ttsAudioCache = new Map<string, string>();
 // 3. Fast Text-to-Speech (TTS) Endpoint powered by Gemini Flash Lite TTS with fallback & caching
 app.post('/api/tts', async (req, res) => {
   try {
-    const { text, voiceName = 'Aoede', speed = 1.15 } = req.body;
+    const { text, voiceName = 'Aoede' } = req.body;
     if (!text || typeof text !== 'string') {
       res.status(400).json({ error: 'Text is required.' });
       return;
@@ -250,6 +359,7 @@ app.post('/api/tts', async (req, res) => {
       }
     }
 
+    const ai = getAiClient();
     if (!ai) {
       console.warn('[LCARS TTS] No Gemini AI instance configured.');
       res.json({ audioData: null, fallbackToBrowser: true });
