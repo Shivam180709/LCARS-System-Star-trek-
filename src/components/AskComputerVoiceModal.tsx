@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { lcarsAudio } from '../utils/lcarsAudio';
 import { speechController, SpeechStatus } from '../utils/speechController';
+import { getStarfleetBriefAnswer } from '../utils/starfleetArchive';
 
 export interface ChatMessage {
   id: string;
@@ -312,15 +313,17 @@ export const AskComputerVoiceModal: React.FC<AskComputerProps> = ({
           setStreamingResponse('');
           if (autoSpeak) speechController.speakText(replyText, selectedVoice);
         } catch {
-          const errorReply = `Subspace communication link interrupted while processing "${userMessage.text}". Please re-engage your query.`;
+          // Offline / static host fallback (e.g., itch.io): query embedded Starfleet knowledge archive
+          const fallbackReply = getStarfleetBriefAnswer(userMessage.text, topicRelevant);
           const assistantMessage: ChatMessage = {
             id: (Date.now() + 1).toString(),
             role: 'assistant',
-            text: errorReply,
+            text: fallbackReply,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           };
           setChatHistory((prev) => [...prev, assistantMessage]);
           setStreamingResponse('');
+          if (autoSpeak) speechController.speakText(fallbackReply, selectedVoice);
         }
       }
     } finally {

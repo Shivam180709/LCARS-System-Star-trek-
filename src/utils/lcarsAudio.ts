@@ -159,7 +159,8 @@ class LcarsAudioSystem {
   private initThemeAudio(): HTMLAudioElement | null {
     if (typeof window === 'undefined') return null;
     if (!this.themeAudio) {
-      const audio = new Audio('/audio/enterprising_young_men.mp3');
+      const baseUrl = (import.meta.env.BASE_URL || './').endsWith('/') ? (import.meta.env.BASE_URL || './') : `${import.meta.env.BASE_URL}/`;
+      const audio = new Audio(`${baseUrl}audio/enterprising_young_men.mp3`);
       audio.preload = 'auto';
       audio.volume = this.themeVolume;
 
